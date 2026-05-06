@@ -3,7 +3,7 @@
 > A graphical desktop interface built on top of [ATOUIYakoub/adhahi-auto-register](https://github.com/ATOUIYakoub/adhahi-auto-register).  
 > All credit for the original automation logic goes to the upstream project.
 
-https://github.com/user-attachments/assets/f3c5b4dc-4728-4246-a22c-301eb6b3ca16
+https://github.com/user-attachments/assets/d5825e3b-5fe1-4fc6-92f8-dedf895cac03
 
 ---
 
