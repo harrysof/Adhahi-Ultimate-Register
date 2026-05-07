@@ -79,13 +79,22 @@ def load_cfg():
 def save_cfg(c):
     json.dump(c, open(CONFIG_FILE,"w",encoding="utf-8"), ensure_ascii=False, indent=2)
 
-def fetch_quotas():
+def fetch_quotas(retries=2, timeout=20):
+    """Fetch quota data with silent retries on timeout."""
     req = urllib.request.Request(API_URL, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json",
     })
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read())
+    last_err = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(2)  # brief pause before retry
+    raise last_err
 
 def available_wilayas(data, targets):
     avail = {str(e.get("wilayaCode","")).zfill(2): e.get("available",False) for e in data}
@@ -662,7 +671,7 @@ class App(tk.Tk):
             except urllib.error.HTTPError as e:
                 self.log("WARN", f"Poll #{self._attempt:04d}  HTTP {e.code}: {e.reason}")
             except urllib.error.URLError as e:
-                self.log("ERR",  f"Poll #{self._attempt:04d}  Network error: {e.reason}")
+                self.log("WARN", f"Poll #{self._attempt:04d}  Network hiccup: {e.reason} — will retry next poll")
             except Exception as e:
                 self.log("ERR",  f"Poll #{self._attempt:04d}  {e}")
 
