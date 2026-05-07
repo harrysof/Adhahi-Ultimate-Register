@@ -242,8 +242,7 @@ class App(tk.Tk):
 
         self.cfg      = load_cfg()
         self._running  = False
-        self._sessions = set()  # currently active browser threads
-        self._done     = set()   # wilayas fully handled — never re-trigger
+        self._api_active = set() # wilayas currently open in the API
         self._attempt  = 0
 
         # tkinter vars
@@ -554,8 +553,7 @@ class App(tk.Tk):
         save_cfg(self.cfg)
         self._running  = True
         self._attempt  = 0
-        self._sessions = set()
-        self._done     = set()
+        self._api_active = set()
 
         self._btn_start.configure(state="disabled")
         self._btn_stop.configure(state="normal")
@@ -606,40 +604,29 @@ class App(tk.Tk):
                 data  = fetch_quotas()
                 avail = available_wilayas(data, self.cfg["target_wilayas"])
 
-                if avail:
-                    for w in avail:
-                        if w in self._done:
-                            pass  # already successfully registered, skip silently
-                        elif w in self._sessions:
-                            self.log("INFO", f"Poll #{self._attempt:04d}  [{ts}]  Wilaya {w} still open (browser session active)")
-                        else:
-                            self._sessions.add(w)
-                            self.log("FOUND",
-                                f"🎉  WILAYA {w} IS OPEN!  Launching browser …")
-                            send_telegram(
-                                self.cfg["bot_token"], self.cfg["chat_id"],
-                                f"🚨 <b>WILAYA {w} AVAILABLE!</b>\n⏰ {now()}")
-                            snap = self.cfg.copy(); ww = w
-                            def _run(w=ww, c=snap):
-                                success = False
-                                try:
-                                    fill_and_submit(
-                                        c, w, self.log)
-                                    success = True
-                                except Exception as e:
-                                    self.log("ERR", f"[W{w}] Unhandled thread error: {e}")
-                                finally:
-                                    self._sessions.discard(w)
-                                    if success:
-                                        self._done.add(w)
-                                        self.log("SYSTEM", f"[W{w}] Session closed — registration done, wilaya locked")
-                                    else:
-                                        self.log("SYSTEM", f"[W{w}] Session closed after error — will re-try if slot re-opens")
-                            threading.Thread(target=_run, daemon=True).start()
+                avail_set = set(avail)
+                newly_available = avail_set - self._api_active
+                
+                if newly_available:
+                    for w in newly_available:
+                        self.log("FOUND", f"🎉  WILAYA {w} IS OPEN!  Launching browser …")
+                        send_telegram(
+                            self.cfg["bot_token"], self.cfg["chat_id"],
+                            f"🚨 <b>WILAYA {w} AVAILABLE!</b>\n⏰ {now()}")
+                        snap = self.cfg.copy(); ww = w
+                        def _run(w=ww, c=snap):
+                            try:
+                                fill_and_submit(c, w, self.log)
+                            except Exception as e:
+                                self.log("ERR", f"[W{w}] Unhandled thread error: {e}")
+                        threading.Thread(target=_run, daemon=True).start()
+
+                self._api_active = avail_set
+
+                if avail_set:
+                    self.log("INFO", f"Poll #{self._attempt:04d}  [{ts}]  — Open slots: {', '.join(avail)}")
                 else:
-                    self.log("INFO",
-                        f"Poll #{self._attempt:04d}  [{ts}]  "
-                        f"— no open slots yet")
+                    self.log("INFO", f"Poll #{self._attempt:04d}  [{ts}]  — no open slots yet")
 
                 self.after(0, lambda t=ts: self._sb_time.configure(
                     text=f"last poll: {t}"))
