@@ -8,7 +8,7 @@ Right panel : live 24/7 log
 pip install selenium webdriver-manager
 """
 
-import json, os, sys, threading, time, tkinter as tk
+import json, os, sys, threading, time, tkinter as tk, random
 from tkinter import ttk, messagebox, scrolledtext
 import urllib.request, urllib.error
 from datetime import datetime
@@ -22,7 +22,14 @@ CONFIG_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "adhahi_
 API_URL      = "https://adhahi.dz/api/v1/public/wilaya-quotas"
 REGISTER_URL = "https://adhahi.dz/register"
 
-# Cache ChromeDriver path once at startup — avoids re-downloading on every browser launch
+# ── undetected-chromedriver availability check ──────────────────
+try:
+    import undetected_chromedriver as _uc_mod
+    _UC_AVAILABLE = True
+except ImportError:
+    _UC_AVAILABLE = False
+
+# Cache ChromeDriver path once at startup (only used when uc is unavailable)
 _CHROMEDRIVER_PATH = None
 def _get_chromedriver_path():
     global _CHROMEDRIVER_PATH
@@ -106,7 +113,7 @@ def fetch_quotas(retries=2, timeout=20):
         except Exception as e:
             last_err = e
             if attempt < retries - 1:
-                time.sleep(2)  # brief pause before retry
+                time.sleep(2)
     raise last_err
 
 def available_wilayas(data, targets):
@@ -124,7 +131,9 @@ def send_telegram(token, chat_id, text):
     except: pass
 
 
-# ── Selenium fill_and_submit ──────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+#  SELENIUM FILL & SUBMIT
+# ══════════════════════════════════════════════════════════════════
 def fill_and_submit(cfg, wilaya, log_fn):
     try:
         from selenium import webdriver
@@ -140,18 +149,31 @@ def fill_and_submit(cfg, wilaya, log_fn):
 
     try:
         log_fn("INFO", f"{tag} Opening Chrome …")
-
-        opts = webdriver.ChromeOptions()
-        opts.add_argument("--start-maximized")
-        log_fn("INFO", f"{tag} Locating ChromeDriver …")
-        driver = webdriver.Chrome(
-            service=Service(_get_chromedriver_path()),
-            options=opts)
-        log_fn("OK",   f"{tag} Chrome launched")
+        if _UC_AVAILABLE:
+            log_fn("INFO", f"{tag} Using undetected-chromedriver (bot bypass)")
+            import undetected_chromedriver as uc
+            opts = uc.ChromeOptions()
+            opts.add_argument("--start-maximized")
+            driver = uc.Chrome(options=opts, use_subprocess=True)
+        else:
+            log_fn("WARN", f"{tag} undetected-chromedriver not installed — "
+                           "site may block the bot.  pip install undetected-chromedriver")
+            opts = webdriver.ChromeOptions()
+            opts.add_argument("--start-maximized")
+            opts.add_argument("--disable-blink-features=AutomationControlled")
+            opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+            opts.add_experimental_option("useAutomationExtension", False)
+            log_fn("INFO", f"{tag} Locating ChromeDriver …")
+            driver = webdriver.Chrome(
+                service=Service(_get_chromedriver_path()),
+                options=opts)
+            driver.execute_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+        log_fn("OK", f"{tag} Chrome launched")
         wait = WebDriverWait(driver, 30)
 
     except Exception as e:
-        log_fn("ERR", f"{tag} ❌ Failed to launch Chrome: {e}")
+        log_fn("ERR", f"{tag} Failed to launch Chrome: {e}")
         log_fn("ERR", f"{tag}    Make sure Google Chrome is installed on this PC.")
         return
 
@@ -160,6 +182,7 @@ def fill_and_submit(cfg, wilaya, log_fn):
         time.sleep(0.2)
         driver.execute_script("arguments[0].click();", el)
 
+    # ── combo: always picks the first option ─────────────────────
     def combo(fid, search, label):
         inp = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, f"#{fid}")))
         jc(inp); time.sleep(0.3)
@@ -168,14 +191,44 @@ def fill_and_submit(cfg, wilaya, log_fn):
         try:
             jc(wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR,
                 "li[role='option']:first-child, [role='listbox'] li:first-child"))))
-        except:
+        except Exception:
             inp.send_keys(Keys.ARROW_DOWN); time.sleep(0.3); inp.send_keys(Keys.RETURN)
         log_fn("OK", f"{tag} ✓ {label}")
+
+    # ── combo_random: picks a RANDOM option from the dropdown ────
+    def combo_random(fid, search, label):
+        inp = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, f"#{fid}")))
+        jc(inp); time.sleep(0.3)
+        inp.send_keys(Keys.CONTROL+"a"); inp.send_keys(Keys.DELETE)
+        inp.send_keys(search); time.sleep(2.5)          # slightly longer wait so all options load
+        try:
+            options = driver.find_elements(
+                By.CSS_SELECTOR,
+                "li[role='option'], [role='listbox'] li, [role='option']"
+            )
+            # Filter to visible options only
+            visible = [o for o in options if o.is_displayed()]
+            if visible:
+                chosen = random.choice(visible)
+                chosen_text = chosen.text.strip() or "(unknown)"
+                jc(chosen)
+                log_fn("OK", f"{tag} ✓ {label}  →  '{chosen_text}'  (random pick)")
+            else:
+                # Fallback: arrow-down picks one deterministically
+                inp.send_keys(Keys.ARROW_DOWN); time.sleep(0.3); inp.send_keys(Keys.RETURN)
+                log_fn("OK", f"{tag} ✓ {label}  (fallback: first option)")
+        except Exception as e:
+            log_fn("WARN", f"{tag} combo_random fallback: {e}")
+            try:
+                inp.send_keys(Keys.ARROW_DOWN); time.sleep(0.3); inp.send_keys(Keys.RETURN)
+            except Exception:
+                pass
 
     try:
         driver.get(REGISTER_URL)
         log_fn("OK", f"{tag} Page loaded")
 
+        # ── Text fields ──────────────────────────────────────────
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR,"#reg-nin"))).send_keys(p["nin"])
         log_fn("OK", f"{tag} NIN filled")
         driver.find_element(By.CSS_SELECTOR,"#reg-cni").send_keys(p["cni"])
@@ -189,11 +242,17 @@ def fill_and_submit(cfg, wilaya, log_fn):
         driver.find_element(By.CSS_SELECTOR,"#reg-confirm-password").send_keys(p["password"])
         log_fn("OK", f"{tag} Password filled")
 
+        # ── Wilaya (first match, as before) ─────────────────────
         combo("reg-wilaya", p["wilaya"], f"Wilaya {p['wilaya']}")
         time.sleep(2)
-        try:    combo("reg-commune","","Commune (first available)")
-        except: log_fn("WARN", f"{tag} Commune step unavailable")
 
+        # ── Commune (RANDOM pick) ────────────────────────────────
+        try:
+            combo_random("reg-commune", "", "Commune (random)")
+        except Exception:
+            log_fn("WARN", f"{tag} Commune step unavailable")
+
+        # ── Payment method ───────────────────────────────────────
         time.sleep(1.5)
         try:
             radios = wait.until(lambda d: d.find_elements(By.CSS_SELECTOR,"[role='radio']"))
@@ -203,6 +262,7 @@ def fill_and_submit(cfg, wilaya, log_fn):
         except Exception as e:
             log_fn("WARN", f"{tag} Payment select failed: {e}")
 
+        # ── Privacy checkbox ─────────────────────────────────────
         time.sleep(0.5)
         try:
             cb = wait.until(EC.presence_of_element_located(
@@ -212,17 +272,154 @@ def fill_and_submit(cfg, wilaya, log_fn):
         except Exception as e:
             log_fn("WARN", f"{tag} Checkbox error: {e}")
 
-        # ── CAPTCHA + Submit — done manually by user ──────────
-        log_fn("INFO", f"{tag} 🔒 CAPTCHA + Submit — please complete in Chrome")
+        # ── CAPTCHA — manual solve ────────────────────────────────
+        time.sleep(0.8)
+        log_fn("INFO", f"{tag} 🔒 Scrolling to captcha for you to solve …")
+
+        # Scroll the captcha answer field into view so the user can see it
+        try:
+            captcha_ans = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "#reg-captcha-answer")))
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center'});", captcha_ans)
+            # Also try to scroll the captcha image into view
+            try:
+                captcha_img = driver.execute_script("""
+                    var inp = document.getElementById('reg-captcha-answer');
+                    if (!inp) return null;
+                    var parent = inp.parentElement;
+                    for (var i = 0; i < 6; i++) {
+                        if (!parent) break;
+                        var img = parent.querySelector('img');
+                        if (img) return img;
+                        parent = parent.parentElement;
+                    }
+                    return null;
+                """)
+                if captcha_img:
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", captcha_img)
+            except Exception:
+                pass
+        except Exception as e:
+            log_fn("WARN", f"{tag} Could not scroll to captcha: {e}")
+
+        log_fn("WARN", f"{tag} 🔒 Please solve the CAPTCHA in Chrome now!")
         send_telegram(cfg["bot_token"], cfg["chat_id"],
-            f"🔒 CAPTCHA needed – Wilaya {wilaya}\nFill CAPTCHA & submit in browser\n⏰ {now()}")
+            f"🔒 CAPTCHA needs manual solve – Wilaya {wilaya}\n"
+            f"Switch to Chrome and fill it in\n⏰ {now()}")
+
+        # Wait for the user to fill in the captcha answer (poll the field)
+        log_fn("INFO", f"{tag} Waiting for you to enter the captcha …")
+        captcha_filled = False
+        captcha_deadline = time.time() + 180   # 3 minutes to solve
+        while time.time() < captcha_deadline:
+            try:
+                val = driver.find_element(
+                    By.CSS_SELECTOR, "#reg-captcha-answer").get_attribute("value")
+                if val and val.strip():
+                    captcha_filled = True
+                    break
+            except Exception:
+                pass
+            time.sleep(1.0)
+
+        if captcha_filled:
+            log_fn("OK", f"{tag} ✅ Captcha filled — proceeding to submit …")
+        else:
+            log_fn("WARN", f"{tag} ⏰ Captcha not filled within 3 min — "
+                           "you can still submit manually.")
+
+        # ── Auto-submit ──────────────────────────────────────
+        # The button is grey/disabled until the whole form is valid,
+        # then turns GREEN.  We locate it by Arabic text first, then
+        # poll every 250 ms until it becomes enabled before clicking.
+        log_fn("INFO", f"{tag} Waiting for register button to turn green ...")
+        submitted    = False
+        tasjeel_btn  = None
+
+        XPATHS = [
+            "//button[contains(., 'تسجيل')]",
+            "//input[contains(@value, 'تسجيل')]",
+            "//*[@role='button' and contains(., 'تسجيل')]",
+            "//button[@type='submit']",
+            "//input[@type='submit']",
+        ]
+
+        # Step 1: find the button (present even while grey)
+        for _ in range(20):
+            for xp in XPATHS:
+                try:
+                    for c in driver.find_elements(By.XPATH, xp):
+                        if c.is_displayed():
+                            tasjeel_btn = c
+                            break
+                except Exception:
+                    pass
+                if tasjeel_btn:
+                    break
+            if tasjeel_btn:
+                break
+            time.sleep(0.5)
+
+        if tasjeel_btn is None:
+            log_fn("WARN", f"{tag} Register button not found — click manually.")
+        else:
+            # Step 2: wait up to 20 s for it to turn green (enabled)
+            log_fn("INFO", f"{tag}    Button found — waiting for green ...")
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                try:
+                    if (tasjeel_btn.is_enabled()
+                            and not tasjeel_btn.get_attribute("disabled")
+                            and tasjeel_btn.get_attribute("aria-disabled") != "true"):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+            else:
+                log_fn("WARN", f"{tag}    Still grey after 20 s — clicking anyway ...")
+
+            # Step 3: click it
+            try:
+                jc(tasjeel_btn)
+                log_fn("OK", f"{tag} Register button clicked!")
+                submitted = True
+            except Exception as ce:
+                log_fn("WARN", f"{tag} Normal click failed ({ce}) — JS fallback ...")
+                try:
+                    driver.execute_script("arguments[0].click();", tasjeel_btn)
+                    log_fn("OK", f"{tag} Register button clicked (JS)!")
+                    submitted = True
+                except Exception as je:
+                    log_fn("ERR", f"{tag} Could not click register: {je}")
+
+        if not submitted:
+            log_fn("WARN", f"{tag} Auto-submit failed — please click register manually.")
+
+        # Wait briefly to check for a success/error indicator
+        time.sleep(3)
+        try:
+            page_text = driver.find_element(By.CSS_SELECTOR, "body").text.lower()
+            if any(kw in page_text for kw in ("succès", "success", "تم", "enregistrement")):
+                log_fn("OK", f"{tag} 🎉 Registration SUCCESS detected on page!")
+                send_telegram(cfg["bot_token"], cfg["chat_id"],
+                    f"🎉 <b>REGISTERED!</b> Wilaya {wilaya}\n⏰ {now()}")
+            elif any(kw in page_text for kw in ("erreur", "error", "invalid", "incorrect")):
+                log_fn("WARN", f"{tag} ⚠️  Page shows an error — captcha may have been wrong.")
+                send_telegram(cfg["bot_token"], cfg["chat_id"],
+                    f"⚠️ Captcha may have failed – Wilaya {wilaya}\nCheck Chrome\n⏰ {now()}")
+            else:
+                log_fn("INFO", f"{tag} ℹ️  Page status unclear — verify in Chrome.")
+        except Exception:
+            log_fn("INFO", f"{tag} ℹ️  Could not check page status — verify in Chrome.")
 
     except Exception as e:
         log_fn("ERR", f"{tag} Browser error: {e}")
         send_telegram(cfg["bot_token"], cfg["chat_id"],
             f"❌ Error – Wilaya {wilaya}: {e}")
     finally:
-        log_fn("INFO", f"{tag} Browser left open — close manually when done")
+        log_fn("INFO", f"{tag} Browser left open — close manually when done.")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -238,14 +435,13 @@ class App(tk.Tk):
         try:
             self.iconbitmap(resource_path("icon.ico"))
         except Exception:
-            pass  # icon.ico not found — falls back to default feather
+            pass  # icon.ico not found — falls back to default
 
         self.cfg      = load_cfg()
         self._running  = False
-        self._api_active = set() # wilayas currently open in the API
+        self._api_active = set()
         self._attempt  = 0
 
-        # tkinter vars
         self._fvars: dict[str, tk.StringVar]   = {}
         self._wvars: dict[str, tk.BooleanVar]  = {}
         self._pay   = tk.StringVar(value=self.cfg.get("payment","cash"))
@@ -259,7 +455,6 @@ class App(tk.Tk):
     # BUILD
     # ─────────────────────────────────────────────────────────────
     def _build(self):
-        # Two-pane horizontal split
         pane = tk.PanedWindow(self, orient="horizontal",
                               bg=BORDER, sashwidth=3, sashrelief="flat", bd=0)
         pane.pack(fill="both", expand=True)
@@ -277,13 +472,11 @@ class App(tk.Tk):
     #  LEFT PANEL
     # ══════════════════════════════════════════════════════════════
     def _build_left(self, parent):
-        # ── header bar ───────────────────────────────────────────
         hdr = tk.Frame(parent, bg="#0f2942", pady=10, padx=14)
         hdr.pack(fill="x")
         tk.Label(hdr, text="🐑  adhahi.dz Bot",
                  bg="#0f2942", fg=TEXT, font=("Segoe UI",13,"bold")).pack(side="left")
 
-        # ── scrollable content ───────────────────────────────────
         canvas = tk.Canvas(parent, bg=PANEL, highlightthickness=0, bd=0)
         vsb    = tk.Scrollbar(parent, orient="vertical", command=canvas.yview,
                               bg=PANEL, troughcolor=PANEL)
@@ -301,7 +494,7 @@ class App(tk.Tk):
         canvas.bind_all("<MouseWheel>",
             lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
 
-        # ── SECTION: Credentials ─────────────────────────────────
+        # ── Credentials ──────────────────────────────────────────
         self._sep(body, "🔐  Credentials")
         for lbl, key, secret in [
             ("NIN  (18 digits)",  "nin",      False),
@@ -312,7 +505,6 @@ class App(tk.Tk):
         ]:
             self._entry_row(body, lbl, key, secret)
 
-        # payment
         tk.Label(body, text="Payment method", bg=PANEL, fg=MUTED,
                  font=("Segoe UI",9)).pack(anchor="w", padx=16, pady=(2,1))
         pf = tk.Frame(body, bg=PANEL); pf.pack(anchor="w", padx=16, pady=(0,10))
@@ -322,25 +514,22 @@ class App(tk.Tk):
                            activebackground=PANEL, font=("Segoe UI",9),
                            cursor="hand2").pack(side="left", padx=(0,8))
 
-        # ── SECTION: Telegram ────────────────────────────────────
+        # ── Telegram ─────────────────────────────────────────────
         self._sep(body, "📣  Telegram  (optional — get phone alerts)")
         self._entry_row(body, "Bot Token",  "bot_token", False)
         self._entry_row(body, "Chat ID",    "chat_id",   False)
-
         tk.Button(body, text="🔔  Test Notification",
                   bg=BORDER, fg=TEXT, activebackground="#444c56",
                   relief="flat", font=("Segoe UI",9), cursor="hand2",
                   command=self._test_tg).pack(anchor="w", padx=16, pady=(0,12))
 
-        # ── SECTION: Wilayas ─────────────────────────────────────
+        # ── Wilayas ───────────────────────────────────────────────
         self._sep(body, "🗺  Target Wilayas  (check all you want to monitor)")
-
-        # select-all / none helpers
         sbf = tk.Frame(body, bg=PANEL); sbf.pack(anchor="w", padx=16, pady=(0,4))
-        tk.Button(sbf, text="✔ All",   width=7, bg=BORDER, fg=TEXT, relief="flat",
+        tk.Button(sbf, text="✔ All",  width=7, bg=BORDER, fg=TEXT, relief="flat",
                   font=("Segoe UI",8), cursor="hand2",
                   command=lambda: self._sel_all(True)).pack(side="left", padx=(0,4))
-        tk.Button(sbf, text="✘ None",  width=7, bg=BORDER, fg=TEXT, relief="flat",
+        tk.Button(sbf, text="✘ None", width=7, bg=BORDER, fg=TEXT, relief="flat",
                   font=("Segoe UI",8), cursor="hand2",
                   command=lambda: self._sel_all(False)).pack(side="left")
 
@@ -356,7 +545,7 @@ class App(tk.Tk):
                            cursor="hand2").grid(row=row, column=col, sticky="w", pady=1)
         wf.columnconfigure(0, weight=1); wf.columnconfigure(1, weight=1)
 
-        # ── SECTION: Settings ────────────────────────────────────
+        # ── Settings ─────────────────────────────────────────────
         self._sep(body, "⚙️  Settings")
         sf = tk.Frame(body, bg=PANEL); sf.pack(anchor="w", padx=16, pady=(2,14))
         tk.Label(sf, text="Poll every", bg=PANEL, fg=MUTED,
@@ -409,7 +598,6 @@ class App(tk.Tk):
     #  RIGHT PANEL  —  live log
     # ══════════════════════════════════════════════════════════════
     def _build_right(self, parent):
-        # ── title bar ────────────────────────────────────────────
         top = tk.Frame(parent, bg=BG, padx=14, pady=8)
         top.pack(fill="x")
 
@@ -431,7 +619,6 @@ class App(tk.Tk):
 
         tk.Frame(parent, bg=BORDER, height=1).pack(fill="x")
 
-        # ── log text box ─────────────────────────────────────────
         self._log_box = scrolledtext.ScrolledText(
             parent, state="disabled", wrap="word",
             bg="#010409", fg="#c9d1d9",
@@ -439,7 +626,6 @@ class App(tk.Tk):
             insertbackground=TEXT, padx=10, pady=8)
         self._log_box.pack(fill="both", expand=True)
 
-        # colour tags
         self._log_box.tag_config("ts",     foreground="#484f58")
         self._log_box.tag_config("OK",     foreground=GREEN)
         self._log_box.tag_config("INFO",   foreground="#79c0ff")
@@ -450,7 +636,6 @@ class App(tk.Tk):
         self._log_box.tag_config("SYSTEM", foreground="#484f58",
                                   font=("Consolas",9,"italic"))
 
-        # ── status bar ───────────────────────────────────────────
         sb = tk.Frame(parent, bg=PANEL, pady=4, padx=12)
         sb.pack(fill="x")
         self._sb_msg  = tk.Label(sb, text="Not running.",
@@ -519,7 +704,6 @@ class App(tk.Tk):
             self._sb_time.configure(text=time_)))
 
     def _tick(self):
-        """Update poll counter every second while running."""
         if not self._running: return
         self.after(0, lambda: self._poll_lbl.configure(
             text=f"  polls: {self._attempt}"))
@@ -573,11 +757,9 @@ class App(tk.Tk):
 
         threading.Thread(target=self._poll_loop, daemon=True).start()
         self._tick()
-        # Pre-warm ChromeDriver in background so first detection launches instantly
         threading.Thread(target=self._warmup_driver, daemon=True).start()
 
     def _warmup_driver(self):
-        """Resolve ChromeDriver path in background so first browser launch is instant."""
         try:
             _get_chromedriver_path()
             self.log("SYSTEM", "ChromeDriver ready ✓")
@@ -594,7 +776,7 @@ class App(tk.Tk):
         self.log("SYSTEM", f"Bot stopped — {now()}")
 
     # ─────────────────────────────────────────────────────────────
-    # POLL LOOP  (background thread — never stops until _stop())
+    # POLL LOOP
     # ─────────────────────────────────────────────────────────────
     def _poll_loop(self):
         while self._running:
@@ -604,9 +786,9 @@ class App(tk.Tk):
                 data  = fetch_quotas()
                 avail = available_wilayas(data, self.cfg["target_wilayas"])
 
-                avail_set = set(avail)
+                avail_set      = set(avail)
                 newly_available = avail_set - self._api_active
-                
+
                 if newly_available:
                     for w in newly_available:
                         self.log("FOUND", f"🎉  WILAYA {w} IS OPEN!  Launching browser …")
@@ -638,7 +820,6 @@ class App(tk.Tk):
             except Exception as e:
                 self.log("ERR",  f"Poll #{self._attempt:04d}  {e}")
 
-            # interruptible sleep (checks every 250 ms)
             for _ in range(self._ivar.get() * 4):
                 if not self._running: break
                 time.sleep(0.25)
